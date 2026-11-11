@@ -1,0 +1,14 @@
+{
+  "mode": "narrated_vlog",
+  "workflow": "commercial-youtube",
+  "name": "YouTube episode",
+  "project_slug": "YouTubeEpisode",
+  "version": "v01",
+  "album": "/path/to/album",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "director_review": {"reasoning_effort": "high"},
+  "captions": {"preset": "legacy"},
+  "blocks": []
+}

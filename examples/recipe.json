@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "mode": "music_reel",
+  "workflow": "personal-reel",
+  "director_review": {
+    "reasoning_effort": "high"
+  },
+  "name": "My Trip \u2014 Through my eyes",
+  "version": "reel_v01",
+  "perspective": "Editor",
+  "destination": "My Trip",
+  "project_slug": "MyTrip",
+  "media_library": "MyTrip",
+  "duration": 60,
+  "width": 1080,
+  "height": 1920,
+  "fps": 30,
+  "unique_sources": true,
+  "public_review": "config/public_review_reel_v01.json",
+  "music": {
+    "file": "assets/music/track.mp3",
+    "in": 0,
+    "fade_out": 2.0,
+    "track": "Replace with chosen artist and track",
+    "source": "Record the source and license locally"
+  },
+  "cover_from_movie": true,
+  "cover_time": 0.6,
+  "review_heading": "Through my eyes.",
+  "shots": [],
+  "titles": [],
+  "transitions": []
+}

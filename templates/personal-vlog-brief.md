@@ -1,0 +1,8 @@
+# Personal narrated vlog brief
+
+- Intended viewer, platform and story through line
+- Opening beat, chapter progression and earned ending
+- Native dialogue, planned VO gaps, exact selected takes and picture cues
+- Personal recollections, factual claims to verify and private exclusions
+- Caption languages and placement, quiet music cues and motion samples to compare
+- Requested cut and delivery files

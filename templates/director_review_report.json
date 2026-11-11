@@ -1,0 +1,29 @@
+{
+  "request_id": "Replace with the current review request ID",
+  "movie_sha256": "Replace with the current movie hash",
+  "reviewer_model": "gpt-6.1-sol",
+  "reasoning_effort": "Use the actual effort from the current independent run",
+  "independent_reviewer": true,
+  "score": 0,
+  "scores": {
+    "story": 0,
+    "shot_selection": 0,
+    "pacing": 0,
+    "motion_design": 0,
+    "transitions": 0,
+    "composition_legibility": 0,
+    "ending": 0
+  },
+  "strengths": [],
+  "feedback": [
+    {
+      "at_seconds": 0,
+      "severity": "P2",
+      "finding": "Replace with a specific observed finding; remove this example if there are no findings.",
+      "recommendation": "Replace with an implementable correction.",
+      "status": "open"
+    }
+  ],
+  "evidence": [],
+  "limitations": []
+}

@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Start, render or review a local video project using its editing workflow."""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'scripts'))
+from pipeline_paths import guard_output_tree, recipe_mode, safe_component
+
+
+WORKFLOWS = {
+    'personal-reel': ('music_reel', 'recipe.json', 'Dialogue-free personal music reels'),
+    'personal-vlog': ('narrated_vlog', 'vlog_recipe.json', 'Personal narrated travel vlogs'),
+    'commercial-youtube': ('narrated_vlog', 'commercial_recipe.json', 'Commercial YouTube videos'),
+}
+
+
+def read_json(path):
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f'Expected a JSON object in {path.name}.')
+    return data
+
+
+def write_project(workflow, recipe, album, brief, review=None):
+    slug = safe_component(recipe['project_slug'], 'project slug')
+    version = safe_component(recipe['version'], 'version')
+    folder = ROOT / 'config' / slug / version
+    relative_folder = folder.relative_to(ROOT)
+    output = guard_output_tree(ROOT / 'exports' / slug / version, album=album)
+    if output.exists() or folder.exists():
+        raise ValueError('This project version already exists. Choose an unused version.')
+    recipe.update(workflow=workflow, output_dir=str(output),
+                  brief_file=str(relative_folder / 'brief.md'))
+    files = {'brief.md': brief}
+    if review is not None:
+        recipe['public_review'] = str(relative_folder / 'public_review.json')
+        files['public_review.json'] = review
+    files['recipe.json'] = json.dumps(recipe, indent=2, ensure_ascii=False) + '\n'
+    guard_output_tree(folder, album=album, writable=files)
+    folder.mkdir(parents=True)
+    for filename, content in files.items():
+        with (folder / filename).open('x') as stream:
+            stream.write(content)
+    print(folder / 'recipe.json')
+    print(folder / 'brief.md')
+
+
+def brief_template(workflow):
+    return (ROOT / 'templates' / f'{workflow}-brief.md').read_text()
+
+
+def initialize(workflow, args):
+    mode, template, _ = WORKFLOWS[workflow]
+    album = args.album.expanduser().resolve(strict=True)
+    if not album.is_dir():
+        raise ValueError('The album must be a directory.')
+    if mode == 'music_reel' and album.parent != ROOT.parent:
+        raise ValueError(f'A music-reel album must be a sibling of the checkout under {ROOT.parent}.')
+    recipe = read_json(ROOT / 'examples' / template)
+    recipe.update(name=args.name, project_slug=args.slug, version=args.version)
+    review = None
+    if mode == 'music_reel':
+        recipe.update(media_library=album.name, destination=args.name, review_heading=args.name)
+        review = (ROOT / 'examples/public_review.json').read_text()
+    else:
+        recipe.update(album=str(album), blocks=[])
+        for key in ('music_bed', 'photo_compositions'):
+            recipe.pop(key, None)
+    write_project(workflow, recipe, album, brief_template(workflow), review)
+
+
+def read_project(workflow, path):
+    path = path.expanduser().resolve(strict=True)
+    recipe = read_json(path)
+    mode, _, _ = WORKFLOWS[workflow]
+    if recipe_mode(recipe) != mode:
+        raise ValueError(f'{workflow} requires a {mode} recipe.')
+    declared = recipe.get('workflow')
+    if declared != workflow and (declared is not None or workflow == 'commercial-youtube'):
+        raise ValueError(f'This recipe must select workflow {workflow}.')
+    return path, recipe
+
+
+def revise(workflow, args):
+    _, recipe = read_project(workflow, args.recipe)
+    if recipe.get('workflow') != workflow:
+        raise ValueError('Use a recipe created for this workflow, or revise an older recipe in its existing workspace.')
+    brief = (ROOT / recipe['brief_file']).read_text()
+    review = None
+    if workflow == 'personal-reel':
+        album = ROOT.parent / recipe['media_library']
+        review = (ROOT / recipe['public_review']).read_text()
+    else:
+        album = Path(recipe['album'])
+    recipe.update(version=args.version, finalcut_export=False)
+    for key in ('finalcut_review_report', 'finalcut_user_confirmation'):
+        recipe.pop(key, None)
+    write_project(workflow, recipe, album, brief, review)
+
+
+def run_pipeline(workflow, action, path):
+    path, _ = read_project(workflow, path)
+    mode, _, _ = WORKFLOWS[workflow]
+    interpreter = ROOT / '.venv/bin/python'
+    python = interpreter if interpreter.is_file() else sys.executable
+    subprocess.run([python, ROOT / 'scripts/pipeline.py', action, '--recipe', path], check=True)
+    if action == 'qa' and mode == 'music_reel':
+        subprocess.run([python, ROOT / 'scripts/build_review.py', '--recipe', path,
+                        '--local-only'], check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    workflows = parser.add_subparsers(dest='workflow', required=True)
+    for workflow, (mode, _, description) in WORKFLOWS.items():
+        profile = workflows.add_parser(workflow, help=description, description=description)
+        actions = profile.add_subparsers(dest='action', required=True)
+        init = actions.add_parser('init', help='Create a local brief and starter recipe')
+        init.add_argument('--album', type=Path, required=True, help='Folder containing original media')
+        init.add_argument('--slug', required=True, help='Project identifier for local paths')
+        init.add_argument('--name', required=True, help='Display name')
+        init.add_argument('--version', default='v01', help='Edit version, defaults to v01')
+        revision = actions.add_parser('revise', help='Copy the recipe and brief into a new version')
+        revision.add_argument('--recipe', type=Path, required=True)
+        revision.add_argument('--version', required=True)
+        operations = {
+            'render': 'Render the movie and generate the independent review request',
+            'qa': 'Check the movie and prepare offline review artifacts',
+            'export-finalcut': 'Recreate the approved cut as a Final Cut timeline',
+        }
+        if mode == 'music_reel':
+            operations['review'] = 'Prepare source-window screening sheets'
+        for action, help_text in operations.items():
+            command = actions.add_parser(action, help=help_text)
+            command.add_argument('--recipe', type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        if args.action == 'init':
+            initialize(args.workflow, args)
+        elif args.action == 'revise':
+            revise(args.workflow, args)
+        else:
+            run_pipeline(args.workflow, args.action, args.recipe)
+    except (OSError, ValueError, KeyError) as error:
+        parser.exit(1, f'{error}\n')
+    except subprocess.CalledProcessError as error:
+        parser.exit(error.returncode)
+
+
+if __name__ == '__main__':
+    main()

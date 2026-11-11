@@ -1,0 +1,17 @@
+{
+  "id": "S01",
+  "media_id": "V001",
+  "file": "RAW Videos/clip.mp4",
+  "start_frame": 0,
+  "frames": 60,
+  "in": 0,
+  "speed": 1,
+  "crop_x": 0.5,
+  "crop_y": 0.5,
+  "grade": {
+    "brightness": 0,
+    "saturation": 1,
+    "contrast": 1
+  },
+  "note": "Replace with the selected action and reason"
+}

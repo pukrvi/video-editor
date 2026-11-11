@@ -1,0 +1,7 @@
+{
+  "recipe": "config/reel_v01.json",
+  "status": "selecting_and_reviewing",
+  "request_log": "feedback/request.md",
+  "preferences": "EDITING_PREFERENCES.md",
+  "finalcut_import_status": "not_exported"
+}
