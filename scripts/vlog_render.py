@@ -5,18 +5,19 @@ Pictures may differ from narration. All times are rounded onto a shared integer 
 import argparse, hashlib, json, subprocess, html, concurrent.futures, math, shutil, tempfile, wave
 from pathlib import Path
 from fractions import Fraction
+import numpy as np
 from PIL import Image, ImageOps, ImageFilter, ImageFont
 from photo_io import PHOTO_EXTENSIONS, open_photo
 from pipeline import command, ffmpeg_binary, save, stamp
 from pipeline_paths import guard_output_tree, movie_path
-from quality_gate import REVIEW_FILES, reviewer_effort, sha256_file, write_review_request
+from quality_gate import MODEL, REVIEW_FILES, reviewer_effort, sha256_file, write_review_request
 from vlog_captions import caption_preset, font_overrides, lines_for, verify_selected_faces, write_highlighted
 
 FONT='/System/Library/Fonts/Supplemental/Arial Bold.ttf'
 VERTICAL=(1080,1920)
 LANDSCAPE=(1920,1080)
 LOCAL_INPUT = ['-protocol_whitelist', 'file', '-i']
-RENDER_FILES = ('media', 'graphics', 'photo_layers', 'recipe.json', 'captions.ass', 'captions.srt',
+RENDER_FILES = ('media', 'graphics', 'photo_layers', 'editorial_audit.json', 'recipe.json', 'captions.ass', 'captions.srt',
                 'timeline_words.json', 'caption_evidence.json', 'voice_concat.txt', 'picture_concat.txt',
                 'loudness_pass1.log', 'narration.wav', 'narration_with_music.wav', 'music_processed.wav',
                 'MUSIC_POLICY.json', 'MUSIC_CREDITS.txt', 'MUSIC_PROVENANCE.json', 'narration_with_sfx.wav',
@@ -237,14 +238,104 @@ def picture(v,album,out,index,geometry=VERTICAL):
   candidate.replace(dst)
  return dst
 
-def timeline(r,pictures,voice,out):
- # Existing crash-tested connected audio representation, with clean editable shots.
+def timeline(r,pictures,voice,out,*,composite=None,audio_stems=(),caption_sidecars=None):
  from pipeline import finalcut
  shots=[];f=0
  for i,(v,path) in enumerate(pictures):
   shots.append({'id':f'S{i+1:03}','note':v.get('note',v['file']),'frames':frames(v['duration']),'start_frame':f});f+=frames(v['duration'])
- rr={**r,'shots':shots,'titles':[],'transitions':[],'music':{'track':'Original narration'}}
- return finalcut(rr,[p for v,p in pictures],[],voice,out,reviewed_movie=movie_path(r))
+ rr={**r,'shots':shots,'titles':[],'transitions':[],'music':{'track':'Reviewed audio mix'}}
+ authored_overlays=composition_spans(r)
+ overlays='No picture compositions were authored.'
+ if composite:
+  overlays='Connected baked composition windows include the underlying picture. Disable a window to reveal the clean shots.'
+ elif authored_overlays:
+  overlays='Legacy reconstruction uses clean shots. Authored graphics and photo compositions are available in the reviewed movie.'
+ editability={
+  'picture':'Individual clean shots can be moved or trimmed within their prepared media. Crop, grade and speed are baked.',
+  'overlays':overlays,
+  'audio':('Normalized narration and processed music are separate synchronized clips.' if audio_stems
+           else 'Dialogue, voiceover and any music or effects in the reviewed mix share one audio clip.'),
+  'captions':'Styled captions are in the reviewed movie and the ASS sidecar. Plain text and timing are in the SRT sidecar.',
+  'native_captions':False,
+ }
+ return finalcut(rr,[p for v,p in pictures],[],voice,out,reviewed_movie=movie_path(r),
+                 composite=composite,audio_stems=audio_stems,caption_sidecars=caption_sidecars,editability=editability)
+
+
+def composition_spans(recipe):
+ """Merge overlapping windows where the saved composition covers the clean spine."""
+ fps=recipe['fps']
+ windows=[]
+ for key in ('graphics','transitions','photo_compositions'):
+  for layer in recipe.get(key,[]):
+   start=frames(layer['at'],fps)
+   windows.append((start,start+frames(layer['duration'],fps)))
+ merged=[]
+ for start,end in sorted(windows):
+  if merged and start<=merged[-1][1]:
+   merged[-1]=(merged[-1][0],max(end,merged[-1][1]))
+  else:
+   merged.append((start,end))
+ return merged
+
+
+def pcm24_samples(raw):
+ octets=np.frombuffer(raw,dtype=np.uint8).reshape(-1,3).astype(np.int32)
+ values=octets[:,0]+(octets[:,1]<<8)+(octets[:,2]<<16)
+ return (values^0x800000)-0x800000
+
+
+def stems_match_mix(narration,music,mix,duration):
+ """Use separate clips only when their aligned PCM sum preserves the reviewed mix."""
+ expected=(2,3,48000,round(duration*48000))
+ with wave.open(str(narration),'rb') as voice, wave.open(str(music),'rb') as bed, wave.open(str(mix),'rb') as final:
+  inputs=(voice,bed,final)
+  if any((wav.getnchannels(),wav.getsampwidth(),wav.getframerate(),wav.getnframes())!=expected for wav in inputs):
+   return False
+  while final.tell()<expected[3]:
+   speech,song,mixed=(pcm24_samples(wav.readframes(48000)) for wav in inputs)
+   if np.any(np.abs(speech+song-mixed)>2):
+    return False
+ return True
+
+
+def save_timeline_layers(r,out,composed,voice,music_evidence):
+ def identity(path):
+  return {'path':str(path),'sha256':sha256_file(path)}
+ layers={'captions':{name:identity(out/name) for name in ('captions.ass','captions.srt')}}
+ if composition_spans(r):
+  layers['composite']=identity(composed)
+ if music_evidence and music_evidence.get('processed_music_stem') and not r.get('sfx'):
+  narration=out/'narration.wav'
+  music=Path(music_evidence['processed_music_stem'])
+  if stems_match_mix(narration,music,voice,r['duration']):
+   layers['audio']={'narration.wav':identity(narration),'music_processed.wav':identity(music)}
+ return layers
+
+
+def saved_timeline_layers(r,out,manifest):
+ def checked(record,name):
+  path=Path(record['path']).resolve()
+  if path!=out/name or not path.is_file() or record['sha256']!=sha256_file(path):
+   raise ValueError(f'Saved timeline media changed or is missing: {name}')
+  return path
+ layers=manifest.get('timeline_layers')
+ if layers is None:
+  return None,[],{}
+ spans=composition_spans(r)
+ composite=None
+ if spans:
+  composite={'path':checked(layers['composite'],'graphics_movie.mp4'),'spans':spans}
+ stems=[]
+ if 'audio' in layers:
+  for name,title,role in (('narration.wav','Normalized narration','dialogue'),
+                          ('music_processed.wav','Processed music bed','music')):
+   stems.append({'path':checked(layers['audio'][name],name),'name':title,'role':role})
+ sidecars={}
+ for name in ('captions.ass','captions.srt'):
+  record=layers['captions'][name]
+  sidecars[name]={**record,'path':str(checked(record,name))}
+ return composite,stems,sidecars
 
 def music_protection(r):
  """Output-clock speech spans; absent transcripts never imply speech-free audio.
@@ -263,9 +354,10 @@ def music_protection(r):
   raise ValueError('speech_margin must be finite and at least 0.05 seconds')
  if not math.isfinite(fade) or fade<=0:
   raise ValueError('speech_fade must be finite and positive')
- offset=0;spans=[]; speech=[]
+ offset=0;spans=[]; speech=[]; silent=[]
  for b in r['blocks']:
   d=frames(b['out']-b['in'])/30
+  if b.get('music_silent',False): silent.append([max(0,offset-margin),offset+d+margin])
   words=b.get('words',[])
   if b.get('speech_free',False) and words:
    raise ValueError('speech_free block cannot contain timed speech words')
@@ -275,13 +367,14 @@ def music_protection(r):
    spans.append([a-margin,z+margin])
    speech.append({'role':b.get('audio_role','unspecified'),'start':offset,'end':offset+d})
   offset+=d
+ if silent and policy=='legacy_duck': raise ValueError('music_silent requires quiet_bed or speech_free')
  merged=[]
  for a,z in spans:
   a=max(0,a);z=min(offset,z)
   if merged and a<=merged[-1][1]:merged[-1][1]=max(z,merged[-1][1])
   else:merged.append([a,z])
  evidence={'mix_policy':policy,'speech_margin':margin,'speech_fade':fade,
-         'protected_intervals':merged,'duration':offset,
+         'protected_intervals':merged,'music_silent_intervals':[[a,min(z,offset)] for a,z in silent],'duration':offset,
          'notes':'Timeline-derived conservative speech protection; not listened verification. '
                  'Music alone is gated after processing; source narration is not gated. '
                  'Zero-contribution guarantee applies to the PCM mix before lossy delivery encoding.'}
@@ -300,6 +393,13 @@ def music_protection(r):
  return evidence
 
 def music_gate_expression(evidence):
+ base = _speech_gate_expression(evidence)
+ silent = evidence.get('music_silent_intervals', [])
+ if not silent: return base
+ zero = _speech_gate_expression({**evidence, 'mix_policy':'speech_free', 'protected_intervals':silent})
+ return f'({base})*({zero})'
+
+def _speech_gate_expression(evidence):
  # aeval evaluates every sample, unlike frame-evaluated volume. Ramps finish
  # outside protected spans; exact digital zero covers both safety handles.
  fade=evidence['speech_fade'];release=evidence.get('speech_release',fade);terms=[]
@@ -349,9 +449,7 @@ def measure_music_windows(stem,windows):
    start,end=(min(wav.getnframes(),round(window[key]*rate)) for key in ('start','end'))
    wav.setpos(start); energy=0; count=0; peak=0
    while start<end:
-    raw=np.frombuffer(wav.readframes(min(end-start,round(.75*rate))),dtype=np.uint8).reshape(-1,3).astype(np.int32)
-    values=(raw[:,0]+(raw[:,1]<<8)+(raw[:,2]<<16))
-    values=((values ^ 0x800000)-0x800000)/2**23
+    values=pcm24_samples(wav.readframes(min(end-start,round(.75*rate))))/2**23
     total=float(values@values); energy+=total; count+=values.size
     peak=max(peak,total/values.size)
     start+=values.size//wav.getnchannels()
@@ -489,9 +587,12 @@ def render(recipe):
  r=json.loads(recipe.read_text());album,out=guard_paths(r,recipe_path=recipe)
  reviewer_effort(r)
  r['duration']=validate(r,album)
+ from editorial_plan import require_plan
+ editorial = require_plan(r)
  if r.get('music_bed'):music_protection(r)
  if r.get('sfx'):sfx_events(r)
  out.mkdir(parents=True,exist_ok=True);media=out/'media';media.mkdir(exist_ok=True)
+ save(out/'editorial_audit.json',editorial)
  caption_evidence={};ass=subtitles(r,out,caption_evidence)
  items=[v for b in r['blocks'] for v in b['pictures']]
  geometry=(r['width'],r['height'])
@@ -529,6 +630,7 @@ def render(recipe):
   composed=apply_graphics(clean,r,out,prepared_layers=photo_layers)
  movie=out/movie_path(r).name
  checks=encode_movie(r,out,ass,composed,voice,movie,caption_evidence)
+ timeline_layers=save_timeline_layers(r,out,composed,voice,music_evidence)
  save(out/'caption_evidence.json',caption_evidence)
  save(out/'recipe.json',r)
  request=write_review_request(r,movie)
@@ -536,11 +638,12 @@ def render(recipe):
       'movie':str(movie),'duration':r['duration'],'sha256':request['movie_sha256'],'request_id':request['request_id'],
       'source_audio':any(not b.get('mute',False) for b in r['blocks']),
       'finalcut_export':'deferred; export after review and exact confirmation',
-      'subtitle_editing':'ASS/SRT sidecars; FCP clean picture timeline captions imported separately',
+      'subtitle_editing':'ASS/SRT sidecars for caption styling and timing; the Final Cut XML does not include native captions',
       'captions':{'preset':caption_evidence['preset'],'evidence':'caption_evidence.json'},
       'music':{'policy':'MUSIC_POLICY.json','processed_stem':music_evidence.get('processed_music_stem')} if music_evidence else None,
       'technical':checks,'pictures':len(paths),'prepared_pictures':[str(p) for p in paths],'composed_picture':str(composed),
       'timeline_input_sha256':{'pictures':[sha256_file(p) for p in paths],'audio':sha256_file(voice)},
+      'timeline_layers':timeline_layers,
       'graphics_manifest':str(out/'graphics'/'manifest.json') if r.get('graphics') or r.get('transitions') else None,
       'photo_layers_manifest':str(out/'photo_layers'/'manifest.json') if r.get('photo_compositions') else None,
       'narration_mix':str(voice)})
@@ -550,16 +653,28 @@ def render(recipe):
  print(movie,flush=True)
 
 def export_finalcut(recipe):
- r=json.loads(recipe.read_text());_,out=guard_paths(r,recipe_path=recipe,writable=())
+ r=json.loads(recipe.read_text())
+ movie=movie_path(r)
+ out=guard_output_tree(movie.parent,album=r['album'])
+ from pipeline_paths import timeline_path
+ destinations={out/name for name in (timeline_path(r,movie).name,'finalcut_validation.txt','finalcut_export_checks.json','finalcut_app_verification.json')}
+ for source in (recipe,r.get('finalcut_review_report')):
+  if source and Path(source).resolve() in destinations: raise ValueError('Final Cut output would overwrite an input document')
  saved=out/'recipe.json';manifest=json.loads((out/'render_manifest.json').read_text());rr=json.loads(saved.read_text())
- movie=movie_path(r); saved_movie=movie_path(rr)
+ saved_movie=movie_path(rr)
+ digest=sha256_file(movie)
  if (movie.resolve()!=saved_movie.resolve() or Path(manifest['movie']).resolve()!=movie.resolve()
-     or manifest['sha256']!=sha256_file(movie) or manifest['duration']!=rr['duration']
+     or manifest['sha256']!=digest or manifest['duration']!=rr['duration']
      or manifest.get('recipe_sha256')!=sha256_file(saved)):
   raise ValueError('Saved reconstruction and rendered movie identities differ')
- _,saved_out=guard_paths(rr,writable=())
- if saved_out!=out: raise ValueError('Saved recipe output directory changed')
- rr.update({k:r[k] for k in ('finalcut_review_report','finalcut_user_confirmation') if k in r})
+ approval_fields={'finalcut_review_report','finalcut_user_confirmation','finalcut_export'}
+ ignored=approval_fields|{'duration'}
+ if {k:v for k,v in r.items() if k not in ignored}!={k:v for k,v in rr.items() if k not in ignored}:
+  raise ValueError('Current recipe differs from the saved cut. Use the matching recipe and review.')
+ for key in approval_fields:
+  rr.pop(key,None)
+  if key in r:
+   rr[key]=r[key]
  items=[v for b in rr['blocks'] for v in b['pictures']]
  paths=[Path(x).resolve() for x in manifest['prepared_pictures']]
  voice=Path(manifest.get('narration_mix',out/'narration.wav')).resolve()
@@ -569,7 +684,14 @@ def export_finalcut(recipe):
   raise ValueError('Saved timeline media is outside its reconstruction paths or incomplete')
  if manifest.get('timeline_input_sha256')!={'pictures':[sha256_file(p) for p in paths],'audio':sha256_file(voice)}:
   raise ValueError('Saved timeline media changed or lacks render-time hashes')
- return timeline(rr,list(zip(items,paths)),voice,out)
+ request=json.loads((out/'director_review_request.json').read_text())
+ if (Path(request.get('movie','')).resolve()!=movie.resolve()
+     or request.get('movie_sha256')!=digest or request.get('request_id')!=manifest.get('request_id')
+     or request.get('version')!=rr['version'] or request.get('reviewer_model')!=MODEL
+     or request.get('reasoning_effort')!=reviewer_effort(rr)):
+  raise ValueError('Director review request belongs to another render')
+ composite,stems,sidecars=saved_timeline_layers(rr,out,manifest)
+ return timeline(rr,list(zip(items,paths)),voice,out,composite=composite,audio_stems=stems,caption_sidecars=sidecars)
 
 if __name__=='__main__':
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('recipe',type=Path);p.add_argument('--export-finalcut',action='store_true',help='Recreate timeline from saved render, without rerendering video');args=p.parse_args()

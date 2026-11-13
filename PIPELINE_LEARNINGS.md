@@ -27,3 +27,10 @@ Follow the [export policy](docs/FINAL_CUT_EXPORT_POLICY.md). Verify local media 
 ## Review and reuse
 
 Store exact movie identity, request ID, version and actual review status. Technical decode, native-size samples, subjective listening, ASR correctness, the director’s judgment, user approval and Final Cut app verification are distinct evidence. Run unit checks and a short normal-path fixture before promoting an implementation. Mocked ASR checks cover mechanics. Recognition quality needs listened source evidence. Keep private samples, reports, credentials and trip metadata out of repository history.
+
+
+## Learning from a user-finished cut
+
+A polished sampled render can still require substantial editing. First-cut readiness depends on source selection, cue alignment and action progression, not only graphic correctness or a numerical director score. Compare the user's exported timeline and movie against the prior cut before promoting preferences. Keep the actual films, XML, source names, transcript and timestamp evidence local.
+
+Use the narrated workflow's editorial plan checks before encoding, four-panel compositions where warranted, and music_silent blocks for foreground location sound. Reuse the existing five gates rather than adding review stages. Exact audio offsets and same-source nonoverlapping cuts matter: a split clip is not automatically repetition. Known limitation: metadata consistency and technical tests cannot certify taste, factual scene identity or subjective listening. The target is a resolved first cut; one-shot creative quality is not guaranteed by passing these checks.

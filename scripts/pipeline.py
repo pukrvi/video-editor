@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 import xml.etree.ElementTree as ET
 from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageFilter
 import numpy as np
-from check_finalcut import check_timeline
+from check_finalcut import check_timeline, record_app_verification
 import motion_graphics
 import transition_graphics
 import photo_stack
@@ -358,15 +358,20 @@ def mix_music(recipe,outdir):
     norm=f"loudnorm=I=-14:TP=-1:LRA=9:measured_I={data['input_i']}:measured_TP={data['input_tp']}:measured_LRA={data['input_lra']}:measured_thresh={data['input_thresh']}:offset={data['target_offset']}:linear=true:print_format=json"
     command(common+['-af',fade+','+norm,'-ar','48000','-ac','2','-c:a','pcm_s24le','-y',out],ROOT/'cache/music_normalize.log')
     return out
-def finalcut(recipe,segments,titles,music,outdir,transitions=(), *, reviewed_movie=None):
+def finalcut(recipe,segments,titles,music,outdir,transitions=(), *, reviewed_movie=None,
+             audio_stems=(), composite=None, caption_sidecars=None, editability=None):
     from finalcut_gate import require_finalcut_approval
     movie = Path(reviewed_movie) if reviewed_movie is not None else movie_path(recipe)
-    require_finalcut_approval(recipe, movie)
+    approval = require_finalcut_approval(recipe, movie)
     out = timeline_path(recipe, movie)
     require(Path(outdir).resolve() == out.parent.resolve(), 'Final Cut outputs must share the reviewed movie folder')
     require(len(segments) == len(recipe['shots']) and len(titles) == len(recipe['titles'])
             and len(transitions) == len(recipe.get('transitions', [])), 'Saved timeline media count differs from the recipe')
-    guard_output_tree(outdir, writable=(out.name, 'finalcut_validation.txt', 'finalcut_export_checks.json'))
+    guard_output_tree(outdir, writable=(out.name, 'finalcut_validation.txt', 'finalcut_export_checks.json', 'finalcut_app_verification.json'))
+    for name in (out.name, 'finalcut_validation.txt', 'finalcut_export_checks.json', 'finalcut_app_verification.json'):
+        require(not (outdir/name).is_dir(), f'Expected a file destination: {name}')
+        report_source=recipe.get('finalcut_review_report')
+        require(not report_source or Path(report_source).resolve()!=(outdir/name).resolve(), 'Final Cut output would overwrite review evidence')
     doc=ET.Element('fcpxml',version='1.10');res=ET.SubElement(doc,'resources')
     fps=recipe['fps']; duration=rational(round(recipe['duration']*fps),fps)
     orientation='Landscape' if recipe['width']>=recipe['height'] else 'Vertical'
@@ -374,8 +379,11 @@ def finalcut(recipe,segments,titles,music,outdir,transitions=(), *, reviewed_mov
     for i,(s,p) in enumerate(zip(recipe['shots'],segments)):
         a=ET.SubElement(res,'asset',id=f'v{i}',name=f"{s['id']} · {s['note']}",start='0s',duration=rational(s['frames'],fps),hasVideo='1',format='r1')
         ET.SubElement(a,'media-rep',kind='original-media',src=p.as_uri())
-    a=ET.SubElement(res,'asset',id='music',name=recipe['music']['track'],start='0s',duration=duration,hasAudio='1',audioSources='1',audioChannels='2',audioRate='48000')
-    ET.SubElement(a,'media-rep',kind='original-media',src=music.as_uri())
+    audio_role='dialogue' if 'blocks' in recipe else 'music'
+    audio_layers = audio_stems or [{'path': music, 'name': recipe['music']['track'], 'role': audio_role}]
+    for i, layer in enumerate(audio_layers):
+        a=ET.SubElement(res,'asset',id=f'a{i}',name=layer['name'],start='0s',duration=duration,hasAudio='1',audioSources='1',audioChannels='2',audioRate='48000')
+        ET.SubElement(a,'media-rep',kind='original-media',src=Path(layer['path']).as_uri())
     for i,p in enumerate(titles):
         t=recipe['titles'][i]
         title_duration=rational(round(t['end']*recipe['fps'])-round(t['start']*recipe['fps']),recipe['fps']) if t.get('style') in motion_graphics.STYLES else '0s'
@@ -385,16 +393,22 @@ def finalcut(recipe,segments,titles,music,outdir,transitions=(), *, reviewed_mov
         t=recipe['transitions'][i]
         a=ET.SubElement(res,'asset',id=f'x{i}',name=t['id'],start='0s',duration=rational(t['duration_frames'],recipe['fps']),hasVideo='1',format='r1')
         ET.SubElement(a,'media-rep',kind='original-media',src=p.as_uri())
+    if composite:
+        a=ET.SubElement(res,'asset',id='composite',name='Baked picture compositions',start='0s',
+                        duration=duration,hasVideo='1',format='r1')
+        ET.SubElement(a,'media-rep',kind='original-media',src=composite['path'].as_uri())
     event_kind='YouTube' if recipe.get('workflow')=='commercial-youtube' else 'Vlogs' if 'blocks' in recipe else 'Reels'
     event_name=recipe.get('destination') or recipe['name']
-    audio_role='dialogue' if 'blocks' in recipe else 'music'
     lib=ET.SubElement(doc,'library');event=ET.SubElement(lib,'event',name=f"{event_name} · {event_kind}")
     project=ET.SubElement(event,'project',name=f"{recipe['name']} · {recipe['version']}")
     seq=ET.SubElement(project,'sequence',format='r1',duration=duration,tcStart='0s',tcFormat='NDF',audioLayout='stereo',audioRate='48k')
     spine=ET.SubElement(seq,'spine')
     for i,s in enumerate(recipe['shots']):
         clip=ET.SubElement(spine,'asset-clip',ref=f'v{i}',name=f"{s['id']} · {s['note']}",offset=rational(s['start_frame'],fps),start='0s',duration=rational(s['frames'],fps))
-        if i==0: ET.SubElement(clip,'audio',ref='music',lane='-1',offset='0s',start='0s',duration=duration,role=audio_role)
+        if i==0:
+            for j, layer in enumerate(audio_layers):
+                ET.SubElement(clip,'audio',ref=f'a{j}',lane=str(-1-j),offset='0s',start='0s',
+                              duration=duration,role=layer['role'],name=layer['name'])
         for j,t in enumerate(recipe['titles']):
             start=round(t['start']*fps);end=round(t['end']*fps)
             if s['start_frame']<=start<s['start_frame']+s['frames']:
@@ -403,6 +417,11 @@ def finalcut(recipe,segments,titles,music,outdir,transitions=(), *, reviewed_mov
             start=t['cut_frame']-t['duration_frames']//2
             if s['start_frame']<=start<s['start_frame']+s['frames']:
                 ET.SubElement(clip,'video',ref=f'x{j}',lane=str(len(titles)+j+1),offset=rational(start-s['start_frame'],recipe['fps']),start='0s',duration=rational(t['duration_frames'],recipe['fps']),name=t['id'])
+        for start, end in composite['spans'] if composite else ():
+            if s['start_frame'] <= start < s['start_frame'] + s['frames']:
+                ET.SubElement(clip,'video',ref='composite',lane='1',
+                              offset=rational(start-s['start_frame'],fps),start=rational(start,fps),
+                              duration=rational(end-start,fps),name='Baked picture composition')
     # FCP 12.4 aborts on nested generic asset-clips in this export.
     # Connected layers use their explicit audio/video element types.
     require(not doc.findall('.//asset-clip/asset-clip'), 'Connected layers must use audio/video nodes')
@@ -413,10 +432,24 @@ def finalcut(recipe,segments,titles,music,outdir,transitions=(), *, reviewed_mov
         ET.ElementTree(doc).write(candidate,encoding='utf-8',xml_declaration=True)
         if dtd.exists():
             command(['xmllint','--noout','--dtdvalid',dtd.as_uri(),candidate],outdir/'finalcut_validation.txt')
-        checks=check_timeline(candidate,recipe)
-        checks.update(checked=stamp(),xml_sha256=sha256_file(candidate))
+        checks=check_timeline(candidate,recipe,audio_layers=audio_layers,composite=composite)
+        checks.update(checked=stamp(),xml_sha256=sha256_file(candidate),xml=str(out),
+                      movie_sha256=approval['movie_sha256'],request_id=approval['request_id'],
+                      version=recipe['version'],director_score=approval['score'],
+                      schema_check='passed' if dtd.exists() else 'installed_dtd_unavailable',
+                      caption_sidecars=caption_sidecars or {},editability=editability or {
+                          'picture':'Prepared picture treatments are baked into individual shots.',
+                          'overlays':'Prepared title and transition clips are separate. Their animation is baked.',
+                          'audio':'One processed music clip.',
+                      })
+        check_candidate=Path(scratch)/'checks.json'
+        check_candidate.write_text(json.dumps(checks,indent=2)+'\n')
         candidate.replace(out)
-    save(outdir/'finalcut_export_checks.json',checks)
+        check_candidate.replace(outdir/'finalcut_export_checks.json')
+    receipt=outdir/'finalcut_app_verification.json'
+    if receipt.is_file():
+        previous=load(receipt); previous.update(status='superseded',reason='Timeline exported again; obtain observations for the current export.')
+        save(receipt,previous)
     return out
 def render(recipe, media, *, recipe_path=None):
     total = validate(recipe, media, approval=True)
@@ -649,14 +682,28 @@ def export_finalcut(recipe):
 
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('action',choices=['review','render','qa','export-finalcut']);ap.add_argument('--recipe',default=current_recipe());args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('action',choices=['review','render','qa','export-finalcut','record-finalcut-verification']);ap.add_argument('--recipe',default=current_recipe())
+    ap.add_argument('--evidence', type=Path)
+    args=ap.parse_args()
+    if (args.action=='record-finalcut-verification') != (args.evidence is not None):
+        ap.error('--evidence is required for record-finalcut-verification')
     recipe=load(ROOT/args.recipe)
+    if args.action=='record-finalcut-verification':
+        try:
+            print(record_app_verification(recipe,args.evidence))
+        except (OSError, ValueError, KeyError, ET.ParseError) as error:
+            ap.exit(1, f'{error}\n')
+        return
     if recipe_mode(recipe) == 'narrated_vlog':
         if args.action=='render':
             from vlog_render import render as render_vlog
             render_vlog(ROOT/args.recipe)
         elif args.action=='export-finalcut':
-            print(command([sys.executable,ROOT/'scripts/vlog_render.py',ROOT/args.recipe,'--export-finalcut']))
+            from vlog_render import export_finalcut as export_vlog_finalcut
+            try:
+                print(export_vlog_finalcut(ROOT/args.recipe))
+            except (OSError, ValueError, KeyError) as error:
+                ap.exit(1, f'{error}\n')
         else:
             from vlog_review import review
             review(ROOT/args.recipe)

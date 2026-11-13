@@ -59,6 +59,7 @@ Each render writes a fresh independent review request. Give the reviewer the exa
 .venv/bin/python scripts/quality_gate.py --recipe RECIPE --report LOCAL_REPORT
 ./video-editor WORKFLOW revise --recipe RECIPE --version v02
 ./video-editor WORKFLOW export-finalcut --recipe RECIPE
+./video-editor WORKFLOW record-finalcut-verification --recipe RECIPE --evidence LOCAL_JSON
 ```
 
 `revise` copies the brief, recipe and any music-reel screening record into a fresh version. Apply feedback there and recheck changed selections. Use the [Final Cut export policy](docs/FINAL_CUT_EXPORT_POLICY.md) when a timeline is requested. Movie delivery includes the offline player and applicable caption sidecars. Keep source media, generated files, private project details, transcripts, source coordinates, rights records and review evidence local.

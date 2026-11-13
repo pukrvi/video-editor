@@ -1,6 +1,6 @@
 """Prepare independent RGBA photo panels for vlog_graphics.apply_graphics.
 
-Recipes contain photo_compositions with at/duration, two or three photos and
+Recipes contain photo_compositions with at/duration, two to four photos and
 optional background/artwork layers. Photos use explicit x/y/width/height pixels,
 fit='contain' (whole original) or 'cover' with normalized focus=[x,y]. Rotation,
 rounded masking, border and shadow are baked into each panel; arrivals, exits
@@ -145,7 +145,7 @@ def prepare_photo_layers(recipe, out):
     pending = []; sources = []
     for ci, comp in enumerate(recipe.get('photo_compositions', [])):
         photos = comp['photos']
-        if len(photos) not in (2, 3): raise ValueError('Photo composition needs two or three photos')
+        if len(photos) not in (2, 3, 4): raise ValueError('Photo composition needs two to four photos')
         at = _num(comp['at'], 'at', 0); duration = _num(comp['duration'], 'duration', 3/fps)
         start = round(at*fps); count = round(duration*fps)
         if start+count > total: raise ValueError('Photo composition exceeds timeline')

@@ -51,6 +51,7 @@ class VideoEditorTest(unittest.TestCase):
                 self.assertTrue(brief_path.is_file())
                 recipe = json.loads(recipe_path.read_text())
                 self.assertEqual(recipe['workflow'], profile)
+                if profile=='personal-vlog': self.assertTrue(recipe['editorial_required'])
                 self.assertEqual(recipe['mode'], mode)
                 self.assertEqual((recipe['width'], recipe['height']), geometry)
                 self.assertEqual(recipe['output_dir'], str((self.checkout/'exports'/profile/'v01').resolve()))
